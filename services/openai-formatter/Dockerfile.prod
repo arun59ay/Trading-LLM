@@ -1,0 +1,20 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# System deps (optional but good practice)
+RUN pip install --no-cache-dir --upgrade pip
+
+# Install Python deps
+COPY services/openai-formatter/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# App code
+COPY services/openai-formatter /app
+
+# Env + port
+ENV PORT=8005
+EXPOSE 8005
+
+# Run Flask app with gunicorn (WSGI)
+CMD ["gunicorn", "-w", "2", "-b", "0.0.0.0:8005", "app:app"]

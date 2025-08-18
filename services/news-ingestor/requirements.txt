@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pydantic
+feedparser
+requests
+kafka-python
+sqlite-utils
+python-dateutil

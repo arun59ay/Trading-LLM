@@ -1,0 +1,116 @@
+services:
+  redpanda:
+    image: redpandadata/redpanda:latest
+    command:
+      [
+        "redpanda","start",
+        "--overprovisioned","--smp","1","--memory","1G","--reserve-memory","0M",
+        "--node-id","0","--check=false",
+        "--kafka-addr","PLAINTEXT://0.0.0.0:9092",
+        "--advertise-kafka-addr","PLAINTEXT://redpanda:9092",
+        "--pandaproxy-addr","PLAINTEXT://0.0.0.0:8082",
+        "--advertise-pandaproxy-addr","PLAINTEXT://redpanda:8082",
+        "--schema-registry-addr","http://0.0.0.0:8081",
+        "--rpc-addr","0.0.0.0:33145",
+        "--advertise-rpc-addr","redpanda:33145"
+      ]
+    ports: ["9092:9092", "9644:9644", "8081:8081", "8082:8082"]
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    ports: ["8123:8123"]
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_PASSWORD=postgres
+    ports: ["5432:5432"]
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports: ["6333:6333"]
+
+  gateway:
+    build:
+      context: .
+      dockerfile: ./services/gateway/Dockerfile.prod
+    env_file: .env
+    environment:
+      - NODE_ENV=production
+      - ALLOW_ORIGIN=http://localhost:3000
+      - ALLOW_ORIGIN=http://localhost:3000
+      - WS_TOPICS=quotes.nse,quotes.crypto,options.nse,signals,news,social,defi.pairs
+      - KAFKA_BROKERS=redpanda:9092
+    depends_on: [redpanda, redis]
+    ports: ["8080:8080"]
+
+  ingestor-sim:
+    build:
+      context: ./services/ingestor-sim
+      dockerfile: Dockerfile.prod
+    env_file: .env
+    environment:
+      - KAFKA_BROKERS=redpanda:9092
+      - BROKERS=redpanda:9092
+    depends_on: [redpanda]
+    restart: unless-stopped
+
+  feature-ta:
+    build:
+      context: ./services/feature-ta
+      dockerfile: Dockerfile.prod
+    env_file: .env
+    ports: ["8001:8001"]
+
+  feature-options:
+    build:
+      context: ./services/feature-options
+      dockerfile: Dockerfile.prod
+    env_file: .env
+    ports: ["8002:8002"]
+
+  model-ensemble:
+    build:
+      context: ./services/model-ensemble
+      dockerfile: Dockerfile.prod
+    env_file: .env
+    ports: ["8003:8003"]
+
+  risk-sizer:
+    build:
+      context: ./services/risk-sizer
+      dockerfile: Dockerfile.prod
+    env_file: .env
+    ports: ["8004:8004"]
+
+  openai-formatter:
+    build:
+      context: ./services/openai-formatter
+      dockerfile: Dockerfile.prod
+    env_file: .env
+    ports: ["8005:8005"]
+
+  rag-ollama:
+    build:
+      context: ./services/rag-ollama
+      dockerfile: Dockerfile.prod
+    env_file: .env
+    ports: ["8006:8006"]
+
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile.prod
+    env_file: .env
+    environment:
+      - NEXT_PUBLIC_GATEWAY_WS=http://gateway:8080
+      - NEXT_PUBLIC_GATEWAY_PATH=/socket.io
+      - NEXT_PUBLIC_GATEWAY_WS_BROWSER=http://localhost:8080
+      - OPENAI_FORMATTER_URL=http://localhost:8005
+    depends_on: [gateway]
+    ports: ["3000:3000"]
+    network_mode: "host"

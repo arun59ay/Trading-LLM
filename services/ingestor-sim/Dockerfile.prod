@@ -1,0 +1,14 @@
+FROM node:18-alpine AS deps
+WORKDIR /app
+COPY package.json tsconfig.json ./
+RUN npm i --production=false
+COPY src ./src
+RUN ./node_modules/.bin/tsc --outDir dist
+
+FROM node:18-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=deps /app/dist ./dist
+COPY package.json ./
+RUN npm i --omit=dev
+CMD ["node","dist/index.js"]

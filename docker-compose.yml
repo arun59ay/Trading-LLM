@@ -1,0 +1,210 @@
+services:
+  redpanda:
+    image: redpandadata/redpanda:latest
+    command:
+      - redpanda start
+      - --overprovisioned
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --node-id 0
+      - --check=false
+      - --kafka-addr PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:9092
+      - --rpc-addr 0.0.0.0:33145
+      - --advertise-rpc-addr redpanda:33145
+    ports:
+      - "9092:9092"
+      - "9644:9644"
+
+  # Database services - uncomment if needed
+  # clickhouse:
+  #   image: clickhouse/clickhouse-server:24.3
+  #   ports:
+  #     - "8123:8123"
+  #   ulimits:
+  #     nofile:
+  #       soft: 262144
+  #       hard: 262144
+
+  # postgres:
+  #   image: postgres:15-alpine
+  #   environment:
+  #     - POSTGRES_PASSWORD=postgres
+  #   ports:
+  #     - "5432:5432"
+
+  # redis:
+  #   image: redis:7-alpine
+  #   ports:
+  #     - "6379:6379"
+
+  # qdrant:
+  #   image: qdrant/qdrant:latest
+  #   ports:
+  #     - "6333:6333"
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    restart: unless-stopped
+
+  rag-ollama:
+    build: ./services/rag-ollama
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_MODEL=llama3.1:8b
+    depends_on:
+      - ollama
+    ports:
+      - "8006:8006"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8006/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  openai-formatter:
+    build: ./services/openai-formatter
+    env_file: .env
+    environment:
+      - OPENAI_MODEL=gpt-4o-mini
+      - OPENAI_BASE_URL=https://api.openai.com/v1
+    ports:
+      - "8005:8005"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8005/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  gateway:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    environment:
+      - KAFKA_BROKER=redpanda:9092
+      - WS_TOPICS=signals
+      - ALLOW_ORIGIN=*
+      - GATEWAY_PORT=8080
+      - RAG_OLLAMA_URL=http://rag-ollama:8006
+      - OPENAI_FORMATTER_URL=http://openai-formatter:8005
+    depends_on:
+      rag-ollama:
+        condition: service_healthy
+      openai-formatter:
+        condition: service_healthy
+      redpanda:
+        condition: service_started
+    ports:
+      - "8080:8080"
+
+  ingestor-sim:
+    build: ./services/ingestor-sim
+    environment:
+      - KAFKA_BROKER=redpanda:9092
+      - SIM_SYMBOLS=NIFTY,BANKNIFTY,RELIANCE,BTCINR,MEME1
+      - SIM_INTERVAL_MS=1000
+      - USE_OLLAMA=true
+      - OLLAMA_CRITIQUE_URL=http://rag-ollama:8006/critique
+    depends_on:
+      redpanda:
+        condition: service_started
+      rag-ollama:
+        condition: service_healthy
+    restart: unless-stopped
+
+  feature-ta:
+    build: ./services/feature-ta
+    env_file:
+      - .env
+    ports:
+      - "8001:8001"
+
+  feature-options:
+    build: ./services/feature-options
+    env_file:
+      - .env
+    ports:
+      - "8002:8002"
+
+  model-ensemble:
+    build: ./services/model-ensemble
+    env_file:
+      - .env
+    ports:
+      - "8003:8003"
+
+  risk-sizer:
+    build: ./services/risk-sizer
+    env_file:
+      - .env
+    ports:
+      - "8004:8004"
+
+  news-ingestor:
+    build: ./services/news-ingestor
+    env_file:
+      - .env
+    environment:
+      KAFKA_BROKER: redpanda:9092
+      OLLAMA_BASE_URL: http://ollama:11434
+      DB_PATH: /data/news.db
+      EMBED_MODEL: nomic-embed-text
+    volumes:
+      - ./data/news:/data
+    depends_on:
+      - redpanda
+      - ollama
+    ports:
+      - "8012:8012"
+
+  ui:
+    build: ./ui
+    environment:
+      - NEXT_PUBLIC_GATEWAY_URL=http://localhost:8080
+      - GATEWAY_INTERNAL=http://gateway:8080
+    depends_on:
+      - gateway
+    ports:
+      - "3000:3000"
+
+  # These services don't have Dockerfiles, so keep them commented
+  # market-ingestor:
+  #   build: ./services/market-ingestor
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     KAFKA_BROKER: redpanda:9092
+  #     SYMBOLS: AAPL,MSFT,SPY,BTC-USD,ETH-USD
+  #     INTERVAL: 1m
+  #     LOOKBACK_MINUTES: 30
+  #     SLEEP_SECONDS: 60
+  #   depends_on:
+  #     - redpanda
+  #   ports:
+  #     - "8011:8011"
+
+  # trainer:
+  #   build: ./services/trainer
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     KAFKA_BROKER: redpanda:9092
+  #     DATA_TOPIC: market.ohlc
+  #     PRED_TOPIC: signals.raw
+  #     MODEL_PATH: /data/model.joblib
+  #   volumes:
+  #     - ./data/models:/data
+  #   depends_on:
+  #     - redpanda
+  #   ports:
+  #     - "8013:8013"
+
+volumes:
+  ollama:
