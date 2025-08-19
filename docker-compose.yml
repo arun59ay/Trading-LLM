@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   redpanda:
     image: redpandadata/redpanda:latest
@@ -16,33 +18,43 @@ services:
     ports:
       - "9092:9092"
       - "9644:9644"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster info || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
 
-  # Database services - uncomment if needed
-  # clickhouse:
-  #   image: clickhouse/clickhouse-server:24.3
-  #   ports:
-  #     - "8123:8123"
-  #   ulimits:
-  #     nofile:
-  #       soft: 262144
-  #       hard: 262144
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
 
-  # postgres:
-  #   image: postgres:15-alpine
-  #   environment:
-  #     - POSTGRES_PASSWORD=postgres
-  #   ports:
-  #     - "5432:5432"
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=app
+    ports:
+      - "5432:5432"
 
-  # redis:
-  #   image: redis:7-alpine
-  #   ports:
-  #     - "6379:6379"
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
 
-  # qdrant:
-  #   image: qdrant/qdrant:latest
-  #   ports:
-  #     - "6333:6333"
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - ./data/qdrant:/qdrant/storage
 
   ollama:
     image: ollama/ollama:latest
@@ -51,6 +63,8 @@ services:
     volumes:
       - ollama:/root/.ollama
     restart: unless-stopped
+    # Optional: pre-pull models so dependents don't race on first run
+    # command: ["/bin/sh","-lc","ollama serve & sleep 2 && ollama pull llama3.1:8b && ollama pull nomic-embed-text && tail -f /dev/null"]
 
   rag-ollama:
     build: ./services/rag-ollama
@@ -89,35 +103,43 @@ services:
       dockerfile: services/gateway/Dockerfile
     environment:
       - KAFKA_BROKER=redpanda:9092
-      - WS_TOPICS=signals
-      - ALLOW_ORIGIN=*
+      - WS_TOPICS=signals.raw         # align with trainer output
+      - ALLOWED_ORIGINS=http://localhost:3000
       - GATEWAY_PORT=8080
       - RAG_OLLAMA_URL=http://rag-ollama:8006
       - OPENAI_FORMATTER_URL=http://openai-formatter:8005
+      - SIMULATE=false 
     depends_on:
       rag-ollama:
         condition: service_healthy
       openai-formatter:
         condition: service_healthy
       redpanda:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
-  ingestor-sim:
-    build: ./services/ingestor-sim
-    environment:
-      - KAFKA_BROKER=redpanda:9092
-      - SIM_SYMBOLS=NIFTY,BANKNIFTY,RELIANCE,BTCINR,MEME1
-      - SIM_INTERVAL_MS=1000
-      - USE_OLLAMA=true
-      - OLLAMA_CRITIQUE_URL=http://rag-ollama:8006/critique
-    depends_on:
-      redpanda:
-        condition: service_started
-      rag-ollama:
-        condition: service_healthy
-    restart: unless-stopped
+  # --- disable simulator when using real feeds ---
+  # ingestor-sim:
+  #   build: ./services/ingestor-sim
+  #   environment:
+  #     - KAFKA_BROKER=redpanda:9092
+  #     - SIM_SYMBOLS=NIFTY,BANKNIFTY,RELIANCE,BTCINR,MEME1
+  #     - SIM_INTERVAL_MS=1000
+  #     - USE_OLLAMA=true
+  #     - OLLAMA_CRITIQUE_URL=http://rag-ollama:8006/critique
+  #   depends_on:
+  #     redpanda:
+  #       condition: service_healthy
+  #     rag-ollama:
+  #       condition: service_healthy
+  #   restart: unless-stopped
 
   feature-ta:
     build: ./services/feature-ta
@@ -147,6 +169,40 @@ services:
     ports:
       - "8004:8004"
 
+  ui:
+    build: ./ui
+    environment:
+      - NEXT_PUBLIC_GATEWAY_URL=http://localhost:8080
+      - GATEWAY_INTERNAL=http://gateway:8080
+    depends_on:
+      gateway:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+
+  # --- REAL DATA INGESTOR ---
+  market-ingestor:
+    build:
+      context: ./services/market-ingestor
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      KAFKA_BROKER: redpanda:9092
+      SYMBOLS: AAPL,MSFT,SPY,RELIANCE.NS,HDFCBANK.NS,^NSEI,BTC-USD,ETH-USD,USDINR=X
+      INTERVAL: 1m
+      LOOKBACK_MINUTES: 60
+      SLEEP_SECONDS: 2
+      ENABLE_POLYGON: "true"
+      ENABLE_FINNHUB: "true"
+      ENABLE_TWELVEDATA: "true"
+      ENABLE_YFINANCE: "false"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    ports:
+      - "8011:8011"
+
   news-ingestor:
     build: ./services/news-ingestor
     env_file:
@@ -159,52 +215,31 @@ services:
     volumes:
       - ./data/news:/data
     depends_on:
-      - redpanda
-      - ollama
+      redpanda:
+        condition: service_healthy
+      ollama:
+        condition: service_started
     ports:
       - "8012:8012"
 
-  ui:
-    build: ./ui
+  trainer:
+    build:
+      context: ./services/trainer
+      dockerfile: Dockerfile
+    env_file:
+      - .env
     environment:
-      - NEXT_PUBLIC_GATEWAY_URL=http://localhost:8080
-      - GATEWAY_INTERNAL=http://gateway:8080
+      KAFKA_BROKER: redpanda:9092
+      DATA_TOPIC: market.ohlc
+      PRED_TOPIC: signals.raw
+      MODEL_PATH: /data/model.joblib
+    volumes:
+      - ./data/models:/data
     depends_on:
-      - gateway
+      redpanda:
+        condition: service_healthy
     ports:
-      - "3000:3000"
-
-  # These services don't have Dockerfiles, so keep them commented
-  # market-ingestor:
-  #   build: ./services/market-ingestor
-  #   env_file:
-  #     - .env
-  #   environment:
-  #     KAFKA_BROKER: redpanda:9092
-  #     SYMBOLS: AAPL,MSFT,SPY,BTC-USD,ETH-USD
-  #     INTERVAL: 1m
-  #     LOOKBACK_MINUTES: 30
-  #     SLEEP_SECONDS: 60
-  #   depends_on:
-  #     - redpanda
-  #   ports:
-  #     - "8011:8011"
-
-  # trainer:
-  #   build: ./services/trainer
-  #   env_file:
-  #     - .env
-  #   environment:
-  #     KAFKA_BROKER: redpanda:9092
-  #     DATA_TOPIC: market.ohlc
-  #     PRED_TOPIC: signals.raw
-  #     MODEL_PATH: /data/model.joblib
-  #   volumes:
-  #     - ./data/models:/data
-  #   depends_on:
-  #     - redpanda
-  #   ports:
-  #     - "8013:8013"
+      - "8013:8013"
 
 volumes:
   ollama:

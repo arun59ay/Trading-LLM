@@ -2,6 +2,10 @@
 import Fastify, { FastifyRequest, FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import { Server as SocketIOServer } from 'socket.io';
+import { startKafkaConsumer } from "./kafka-consumer.js";
+import { startSimulator } from "./simulator.js";
+
+const simulate = (process.env.SIMULATE || "false").toLowerCase() === "true";
 
 const app = Fastify({ logger: true });
 
@@ -115,6 +119,100 @@ io.on('connection', (socket) => {
   });
 });
 
+
+
+if (simulate) {
+  console.log('🚀 Starting data simulation...');
+
+  // keep your existing generator functions here
+  const generateQuote = (symbol: string) => ({
+    ts: Date.now(),
+    symbol,
+    ltp: Math.random() * 1000 + 100,
+    bid: Math.random() * 1000 + 99,
+    ask: Math.random() * 1000 + 101,
+    volume: Math.floor(Math.random() * 100000)
+  });
+
+  const generateSignal = () => ({
+    id: Math.random().toString(36).substr(2, 9),
+    symbol: ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NIFTY', 'BANKNIFTY'][Math.floor(Math.random() * 6)],
+    action: ['BUY', 'SELL'][Math.floor(Math.random() * 2)],
+    entry: Math.random() * 200 + 100,
+    target: Math.random() * 250 + 150,
+    stop: Math.random() * 150 + 50,
+    confidence: 0.6 + Math.random() * 0.4,
+    horizon: ['1H', '4H', '1D'][Math.floor(Math.random() * 3)],
+    exchange: 'NSE',
+    idea: 'Technical breakout pattern detected'
+  });
+
+  // NSE quotes every 2s
+  setInterval(() => {
+    const n = io.engine.clientsCount;
+    if (n > 0) {
+      const symbols = ['NIFTY', 'BANKNIFTY', 'RELIANCE', 'TCS', 'INFY', 'HDFC'];
+      const symbol = symbols[Math.floor(Math.random() * symbols.length)];
+      const quote = generateQuote(symbol);
+      io.emit('quotes_nse', quote);
+      console.log(`📈 Sent NSE quote to ${n} clients: ${symbol} @ ${quote.ltp.toFixed(2)}`);
+    }
+  }, 2000);
+
+  // crypto quotes every 3s
+  setInterval(() => {
+    const n = io.engine.clientsCount;
+    if (n > 0) {
+      const cryptos = ['BTCUSDT', 'ETHUSDT', 'ADAUSDT', 'DOTUSDT'];
+      const symbol = cryptos[Math.floor(Math.random() * cryptos.length)];
+      const quote = generateQuote(symbol);
+      io.emit('quotes_crypto', quote);
+      console.log(`🪙 Sent crypto quote to ${n} clients: ${symbol} @ ${quote.ltp.toFixed(2)}`);
+    }
+  }, 3000);
+
+  // signals every 10s
+  setInterval(() => {
+    const n = io.engine.clientsCount;
+    if (n > 0) {
+      const signal = generateSignal();
+      io.emit('signals', signal);
+      console.log(`📡 Sent signal to ${n} clients: ${signal.action} ${signal.symbol} @ ${signal.entry.toFixed(2)}`);
+    }
+  }, 10000);
+
+  console.log('🎯 Gateway with Socket.IO ready!');
+} else {
+  console.log('🔌 Starting Kafka consumer...');
+  // lazy import to avoid bundling kafkajs in sim-only runs if you want
+  const { Kafka } = await import('kafkajs');
+  const broker = process.env.KAFKA_BROKER || 'redpanda:9092';
+  const topics = (process.env.WS_TOPICS || 'signals.raw').split(',');
+
+  const kafka = new Kafka({ brokers: [broker] });
+  const consumer = kafka.consumer({ groupId: 'gateway-consumer' });
+
+  await consumer.connect();
+  for (const t of topics) await consumer.subscribe({ topic: t, fromBeginning: false });
+
+  await consumer.run({
+    eachMessage: async ({ topic, message }) => {
+      try {
+        const payload = JSON.parse(message.value?.toString() || '{}');
+        io.emit(topic, payload);               // emits with event name = topic
+        // If your UI expects 'signals' instead of 'signals.raw', map here:
+        // if (topic === 'signals.raw') io.emit('signals', payload);
+      } catch (e) {
+        console.error('Kafka parse error', e);
+      }
+    }
+  });
+
+  console.log(`✅ Kafka consumer running on ${broker}, topics: ${topics.join(', ')}`);
+}
+
+
+
 // Generate sample data for testing
 const generateQuote = (symbol: string) => ({
   ts: Date.now(),
@@ -179,3 +277,13 @@ setInterval(() => {
 }, 10000);
 
 console.log('🎯 Gateway with Socket.IO ready!');
+
+
+if (simulate) {
+  startSimulator(io);
+} else {
+  startKafkaConsumer(io).catch((err: any) => {
+    console.error("❌ Kafka consumer failed", err);
+    process.exit(1);
+  });
+}

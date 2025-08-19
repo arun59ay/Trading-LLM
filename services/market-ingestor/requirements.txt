@@ -5,3 +5,8 @@ pandas
 yfinance
 kafka-python
 python-dateutil
+requests
+kafka-python
+yfinance
+websockets
+pytz
